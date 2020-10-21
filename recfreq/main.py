@@ -5,13 +5,11 @@
 import datetime
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from itertools import dropwhile
+from itertools import filterfalse
 from os import chdir
 import os.path as op
 import subprocess
 from tempfile import TemporaryDirectory
-
-import logger
 
 from git import Repo
 import git
@@ -32,15 +30,30 @@ def git_worktree(directory, head):
         g.worktree(['remove', directory])
 
 
+# This is not the canonical way to do this. This shadows all kinds of metadata, and clobbers docstrings
+def on_false(action):
+    def inner(f):
+        def wrapped(*args, **kwargs):
+            ret = f(*args, **kwargs)
+            if not bool(ret):
+                action(*args, **kwargs)
+            return ret
+        return wrapped
+    return inner
+
+
+@on_false(lambda head: print(f"{datetime.utcfromtimestamp(head.commit.authored_date)}\t{head}"))
 def check_branch(head):
     """Create a temporary worktree to check if this branch has the thing we're looking for"""
     global g
     global init_pwd
+    global cmd_args
     try:
         with TemporaryDirectory() as directory:
             with git_worktree(directory, head):
                 chdir(directory)
-                return subprocess.call(command)
+                result = subprocess.run(cmd_args.command, stdin=None, stderr=None, capture_output=True)
+                return result.returncode != 0
     finally:
         chdir(init_pwd)
 
@@ -57,27 +70,26 @@ def main():
 
     arg_parse = argparse.init()
     cmd_args = arg_parse.parse_args()
-    print(cmd_args.command)
+    # print(cmd_args.command)
 
-    recently = timedelta(days=7)
+    recently = timedelta(days=cmd_args.days)
 
     r = Repo(op.curdir)
     g = git.cmd.Git(op.curdir)
 
-    print(f"work dir: {r.working_dir}")
-    print(f"git_dir: {r.git_dir}")
+    # print(f"work dir: {r.working_dir}")
+    # print(f"git_dir: {r.git_dir}")
 
-    for line in g.worktree('list').splitlines():
-        print(f"{line}")
-
-    heads = list(reversed(sorted((x for x in r.remotes.cban.refs
+    heads = list(reversed(sorted((x for x in r.remotes[cmd_args.remote].refs
                                  if now - utcfromtimestamp(x.commit.committed_date) < recently),
                                  key=lambda x: x.commit.authored_date)))
     total_branches = len(heads)
-    for head in heads:
-        print(f"{utcfromtimestamp(head.commit.authored_date)}\t{head}")
-    heads_with_change = list(dropwhile(check_branch, heads))
+    heads_with_change = list(filterfalse(check_branch, heads))
     filtered_branches = len(heads_with_change)
+
+    if filtered_branches > 0:
+        print('----')
+    print(f"{filtered_branches}/{total_branches} branches pass the check")
 
 
 if __name__ == '__main__':
